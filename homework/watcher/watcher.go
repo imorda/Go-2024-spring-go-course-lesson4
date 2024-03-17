@@ -3,6 +3,9 @@ package watcher
 import (
 	"context"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -40,8 +43,76 @@ func NewDirWatcher(refreshInterval time.Duration) *Watcher {
 }
 
 func (w *Watcher) WatchDir(ctx context.Context, path string) error {
-	// TODO реализовать функцию
-	return nil
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return ErrDirNotExist
+	}
+
+	oldWatchedFiles := map[string]struct{}{}
+	watchedFiles := map[string]struct{}{}
+
+	watcherImpl := func(curPath string, filetype fs.DirEntry, fileReadErr error) error {
+		if fileReadErr != nil {
+			return fileReadErr // Fail gracefully
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		if filetype.IsDir() { // We ignore dirs
+			return nil
+		}
+
+		watchedFiles[curPath] = struct{}{}
+
+		return nil
+	}
+
+	flushMaps := func() {
+		oldWatchedFiles = watchedFiles
+		watchedFiles = map[string]struct{}{}
+	}
+
+	if err := filepath.WalkDir(path, watcherImpl); err != nil {
+		return err
+	}
+
+	flushMaps()
+
+	ticker := time.NewTicker(w.refreshInterval)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := filepath.WalkDir(path, watcherImpl); err != nil {
+				return err
+			}
+
+			for curPath := range watchedFiles {
+				if _, exists := oldWatchedFiles[curPath]; !exists {
+					w.Events <- Event{
+						Type: EventTypeFileCreate,
+						Path: curPath,
+					}
+				}
+			}
+			for curPath := range oldWatchedFiles {
+				if _, exists := watchedFiles[curPath]; !exists {
+					w.Events <- Event{
+						Type: EventTypeFileRemoved,
+						Path: curPath,
+					}
+				}
+			}
+
+			flushMaps()
+		}
+	}
 }
 
 func (w *Watcher) Close() {
