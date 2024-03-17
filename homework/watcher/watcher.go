@@ -87,7 +87,7 @@ func (w *Watcher) WatchDir(ctx context.Context, path string) error {
 
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		case <-ticker.C:
 			if err := filepath.WalkDir(path, watcherImpl); err != nil {
 				return err
